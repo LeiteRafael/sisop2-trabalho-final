@@ -40,7 +40,7 @@
 #define DISCOVERY_PORT 8000
 #define MONITORING_PORT 9000
 #define MAX_MSG_LEN 1024
-#define MAX_GUESTS_ALLOWED 5
+#define MAX_GUESTS_ALLOWED 10
 
 
 /* ==================== */
@@ -143,6 +143,8 @@ int main(int argc, char** argv) {
         // coleta mac address e nome do hostname
         char *mac = get_mac_address();
         char *hostname = get_hostname();
+
+	//printf("%s,%s\n", mac, hostname);
 
         // coloca mac e hostname em uma string para enviar ao "manager"
         char *message = (char *) malloc(strlen(mac) + strlen(hostname) + 2);
@@ -327,6 +329,8 @@ void* discovery_service(void* arg) {
             perror("[Discovery|Manager] Erro ao receber mensagem do guest (JOIN_REQUEST)");
             continue;
         }
+
+	//printf("%s\n", buffer);
 
         // separa as strings em mac e hostname
         char *token = strtok(buffer, ",");
@@ -709,7 +713,7 @@ void show_guest_list() {
         printf("|=========================================================================================|\n");
         printf("| %11s      | %-24s | %-25s | %-12s |\n", "Hostname(Id)", "Ip:Port", "MAC Address", "Status");
         while (curr != NULL) {
-            printf("| %-8s(%d)       | %s:%-14d | %-25s | %-12s |\n", curr->hostname, curr->id, curr->ip, curr->port, curr->mac_address, curr->status);
+            printf("| %-8s(%d)    | %s:%-11d | %-25s | %-12s |\n", curr->hostname, curr->id, curr->ip, curr->port, curr->mac_address, curr->status);
             curr = curr->next;
             i++;
         }
@@ -725,8 +729,8 @@ char* get_mac_address() {
     char mac_addr[18];
 
     FILE *fp = popen("ifconfig | \
-                      grep 'ether ' | \
-                      awk '{print $2}'", "r");
+                      grep 'HWaddr ' | \
+                      awk '{print $5}'", "r");
     if (fp == NULL) {
         perror("[Discovery|Guest] Erro ao obter o endereço MAC");
         exit(1);
