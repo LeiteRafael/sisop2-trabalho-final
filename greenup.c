@@ -2,23 +2,20 @@
 /* ==== TODO LIST ==== */
 /* =================== */
 // em ordem de importância:
-//    1. fazer o sistema de monitoramento funcionar para mais de um guest
-//        - **possível tentativa** usar mais de uma porta MONITORING_PORT
-//    2. implementar o envio do pacote WoL
-//        - aparentemente fácil, tem na internet
-//    3. inserir o serviço de interface em algum lugar
-//        - talvez irá precisar criar nova thread
-//    4. testar o programa nos labs
+//    1. permitir que o manager entre após o guest
+//         - **possível tentativa**: manter o guest em um loop até receber um "ACK" do manager
+//    2. enviar o id atualizado dos guests quando um guest anterior à ele na lista executa o comando EXIT
+//    3. testar o programa nos labs
 
-// opcional:
-//    5. melhorar a documentação
-//    6. transformar os "buffers" de envio de mensagem na estrutura citada no pdf
-//    7. modularizar melhor o código
+// >>opcional<<
+//    4. melhorar a documentação
+//    5. transformar os "buffers" de envio de mensagem na estrutura citada no pdf
+//    6. modularizar melhor o código
 //        - separar o código em mais de um arquivo
 //        - desmembrar as funções em funções menores
-//    8. remover as mensagens desnecessárias
+//    7. remover as mensagens desnecessárias
 //        - deixar apenas o serviço de interface no console
-//    9. modificar a função da lista de guests
+//    8. modificar a função da lista de guests
 //        - imprimir uma mensagem quando a lista estiver vazia
 
 
@@ -32,6 +29,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -43,20 +41,21 @@
 /* ==================== */
 #define DISCOVERY_PORT 8000
 #define MONITORING_PORT 9000
-#define MAX_GUESTS 10
 #define MAX_MSG_LEN 1024
+#define MAX_GUESTS_ALLOWED 5
 
 
 /* ==================== */
 /* ==== ESTRUTURAS ==== */
 /* ==================== */
 struct guest_info {
-    char* hostname;
-    char ip[16];
+    char hostname[20*MAX_GUESTS_ALLOWED];
+    char ip[16*MAX_GUESTS_ALLOWED];
+    char mac_address[18*MAX_GUESTS_ALLOWED];
+    char status[10*MAX_GUESTS_ALLOWED];
+
+    int id;
     int port;
-    char* status;
-    char mac_address[18];
-    char network_interface[10];
 
     struct guest_info* next;
 };
@@ -67,19 +66,26 @@ struct guest_info {
 /* ================================ */
 void* discovery_service(void* arg);
 void* monitoring_service(void* arg);
-void  management_service(char* ip, int port, char* mac, char* interface);
-void  interface_service();
+void  management_service(char* ip, int port, char* mac, char* hostname, char* buffer);
+void* interface_service(void* arg);
 
+void  send_wol_packet(char* hostname, int id);
+void  remove_guest(int id);
 void  show_guest_list();
 char* get_mac_address();
-char* get_network_interface();
+int   get_guest_sleep_status();
+char* get_hostname();
 
 
 /* =========================== */
 /* ==== VARIÁVEIS GLOBAIS ==== */
 /* =========================== */
+pthread_mutex_t guest_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 struct guest_info* guest_list = NULL; // lista de guests conectados
 int num_guests = 0; // número de guests conectados
+
+char* manager_ip;
+int current_guest_id;
 
 
 /* ============== */
@@ -93,7 +99,7 @@ int main(int argc, char** argv) {
 
     if (strcmp(argv[1], "manager") == 0) {
         // "manager" cria threads para os serviços de descoberta e monitoramento
-        pthread_t discovery_thread, monitoring_thread;
+        pthread_t discovery_thread, monitoring_thread, interface_thread;
 
         if (pthread_create(&discovery_thread, NULL, discovery_service, NULL) != 0) {
             perror("[Discovery|Manager] Erro ao criar thread");
@@ -105,8 +111,14 @@ int main(int argc, char** argv) {
             exit(1);
         }
 
+        if (pthread_create(&interface_thread, NULL, interface_service, (void*) argv[1]) != 0) {
+            perror("[Interface|Manager] Erro ao criar thread");
+            exit(1);
+        }
+
         pthread_join(discovery_thread, NULL);
         pthread_join(monitoring_thread, NULL);
+        pthread_join(interface_thread, NULL);
     }
     else if (strcmp(argv[1], "guest") == 0) {
         // cria e configura socket para se comunicar com "manager"
@@ -129,18 +141,40 @@ int main(int argc, char** argv) {
         discovery_addr.sin_port = htons(DISCOVERY_PORT);
         discovery_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 
-        // coleta mac address e nome da interface
+        // coleta mac address e nome do hostname
         char *mac = get_mac_address();
-        char *interface = get_network_interface();
+        char *hostname = get_hostname();
 
-        // coloca mac e interface em uma string para enviar ao "manager"
-        char *message = (char *) malloc(strlen(mac) + strlen(interface) + 2);
-        sprintf(message, "%s,%s", mac, interface);
+        // coloca mac e hostname em uma string para enviar ao "manager"
+        char *message = (char *) malloc(strlen(mac) + strlen(hostname) + 2);
+        sprintf(message, "%s,%s", mac, hostname);
 
         if (sendto(discovery_socket, message, strlen(message), 0, (struct sockaddr*)&discovery_addr, sizeof(discovery_addr)) < 0) {
             perror("[Discovery|Guest] Erro ao enviar mensagem ao manager (JOIN_REQUEST)");
             exit(1);
         }
+
+        free(mac);
+        free(hostname);
+        free(message);
+
+        char buffer1[MAX_MSG_LEN];
+
+        // receber id do guest pelo "manager"
+        struct sockaddr_in manager_discovery_addr;
+        socklen_t manager_discovery_addr_len = sizeof(manager_discovery_addr);
+        ssize_t recv_len = recvfrom(discovery_socket, buffer1, sizeof(buffer1), 0, (struct sockaddr*)&manager_discovery_addr, &manager_discovery_addr_len);
+        if (recv_len < 0) {
+            perror("[Monitoring|Guest] Erro ao receber mensagem do manager (SLEEP_STATUS_REQUEST)");
+            exit(1);
+        }
+
+        printf("[Discovery|Guest] Comunicacao estabelecida com \"manager\" %s:%d\n", inet_ntoa(manager_discovery_addr.sin_addr), ntohs(manager_discovery_addr.sin_port));
+
+        manager_ip = inet_ntoa(manager_discovery_addr.sin_addr);
+        current_guest_id = atoi(buffer1);
+        int local_guest_id = current_guest_id;
+        printf("[Discovery|Guest] Seu id no servico: %d\n\n", current_guest_id);
 
         close(discovery_socket);
 
@@ -160,7 +194,15 @@ int main(int argc, char** argv) {
         struct sockaddr_in monitoring_addr;
         memset(&monitoring_addr, 0, sizeof(monitoring_addr));
         monitoring_addr.sin_family = AF_INET;
-        monitoring_addr.sin_port = htons(MONITORING_PORT);
+
+        pthread_t interface_thread;
+        if (pthread_create(&interface_thread, NULL, interface_service, (void *) argv[1]) != 0) {
+            perror("[Interface|Guest] Erro ao criar thread");
+            exit(1);
+        }
+
+        // usa a porta específica do guest para se comunicar com o serviço de monitoramento
+        monitoring_addr.sin_port = htons(MONITORING_PORT + current_guest_id);
         monitoring_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
         // binding
@@ -177,22 +219,46 @@ int main(int argc, char** argv) {
             socklen_t manager_addr_len = sizeof(manager_addr);
             ssize_t recv_len = recvfrom(monitoring_socket, buffer, sizeof(buffer), 0, (struct sockaddr*)&manager_addr, &manager_addr_len);
             if (recv_len < 0) {
-                perror("[Monitoring|Guest] Erro ao receber mensagem do manager (SLEEP_STATUS_REQUEST)");
+                perror("[Monitoring|Guest] Erro ao receber mensagem do manager");
                 continue;
             }
 
             buffer[recv_len] = '\0';
-            printf("[Monitoring|Guest] Mensagem de manager (%s:%d): %s\n", inet_ntoa(manager_addr.sin_addr), ntohs(manager_addr.sin_port), buffer);
 
             // verifica se é mensagem do tipo SLEEP_STATUS_REQUEST
             if (strcmp(buffer, "SLEEP_STATUS_REQUEST") == 0) {
-                // envia SLEEP_STATUS_RESPONSE
-                const char* response = "awaken";
+                if (current_guest_id != -1) {
+                    // envia SLEEP_STATUS_RESPONSE
+                    char response[MAX_MSG_LEN];
+                    snprintf(response, MAX_MSG_LEN, "%s", "awaken");
 
-                ssize_t send_len = sendto(monitoring_socket, response, strlen(response), 0, (struct sockaddr*)&manager_addr, manager_addr_len);
-                if (send_len < 0) {
-                    perror("[Monitoring|Guest] Erro ao enviar mensagem ao manager (SLEEP_STATUS_RESPONSE)");
-                    continue;
+                    ssize_t send_len = sendto(monitoring_socket, response, strlen(response), 0, (struct sockaddr*)&manager_addr, manager_addr_len);
+                    if (send_len < 0) {
+                        perror("[Monitoring|Guest] Erro ao enviar mensagem ao manager (SLEEP_STATUS_RESPONSE)");
+                        continue;
+                    }
+                }
+                else {
+                    // envia SLEEP_SERVICE_QUIT
+                    char response[MAX_MSG_LEN];
+                    snprintf(response, MAX_MSG_LEN, "SLEEP_SERVICE_QUIT");
+
+                    ssize_t send_len = sendto(monitoring_socket, response, strlen(response), 0, (struct sockaddr*)&manager_addr, manager_addr_len);
+                    if (send_len < 0) {
+                        perror("[Monitoring|Guest] Erro ao enviar mensagem ao manager (SLEEP_SERVICE_QUIT)");
+                        continue;
+                    }
+
+                    // aguarda SLEEP_QUIT_ACKNOWLEDGE
+                    ssize_t recv_len = recvfrom(monitoring_socket, buffer, sizeof(buffer), 0, (struct sockaddr*)&manager_addr, &manager_addr_len);
+                    if (recv_len < 0) {
+                        perror("[Monitoring|Guest] Erro ao receber mensagem do manager (SLEEP_STATUS_REQUEST)");
+                        continue;
+                    }
+                    
+                    if (strcmp(buffer, "SLEEP_QUIT_ACKNOWLEDGE") == 0) {
+                        current_guest_id = local_guest_id;
+                    }
                 }
             }
         }
@@ -238,23 +304,34 @@ void* discovery_service(void* arg) {
     struct sockaddr_in guest_addr;
     socklen_t guest_addr_len = sizeof(guest_addr);
     while (1) {
-        // recebe mensagem do guest com "mac,interface"
+        // recebe mensagem do guest com "mac, hostname"
         ssize_t recv_len = recvfrom(discovery_socket, buffer, sizeof(buffer), 0, (struct sockaddr*)&guest_addr, &guest_addr_len);
         if (recv_len < 0) {
             perror("[Discovery|Manager] Erro ao receber mensagem do guest (JOIN_REQUEST)");
             continue;
         }
 
-        // separa as strings em mac e interface
+        // separa as strings em mac e hostname
         char *token = strtok(buffer, ",");
         char *mac = token;
 
         token = strtok(NULL, ",");
-        char *interface = token;
-        strtok(interface, "\n");
+        char *hostname = token;
+        strtok(hostname, "\n");
 
         // chama serviço de gerenciamento para atualizar a lista de guests
-        management_service(inet_ntoa(guest_addr.sin_addr), ntohs(guest_addr.sin_port), mac, interface);
+        management_service(inet_ntoa(guest_addr.sin_addr), ntohs(guest_addr.sin_port), mac, hostname, "unknown");
+        guest_list[num_guests-1].id = num_guests-1;
+
+        // envia uma mensagem para o guest contendo seu id (hostname) no serviço
+        char message[2];
+        snprintf(message, sizeof(message), "%d", num_guests-1);
+        
+        ssize_t send_len = sendto(discovery_socket, message, strlen(message), 0, (struct sockaddr*)&guest_addr, sizeof(guest_addr));
+        if (send_len < 0) {
+            perror("[Monitoring|Manager] Erro ao enviar a mensagem ao guest (SLEEP_STATUS_REQUEST)");
+            continue;
+        }
     }
 
     close(discovery_socket);
@@ -276,16 +353,28 @@ void* monitoring_service(void* arg) {
         exit(1);
     }
 
+    struct timeval timeout;
+    timeout.tv_sec = 1;
+    timeout.tv_usec = 0;
+    if (setsockopt(monitoring_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("[Monitoring|Guest] Erro ao habilitar o modo Timeout");
+        exit(1);
+    }
+
     struct sockaddr_in guest_addr;
     socklen_t guest_addr_len = sizeof(guest_addr);
     guest_addr.sin_family = AF_INET;
-    guest_addr.sin_port = htons(MONITORING_PORT);
 
     while (1) {
-        // itera a lista de guests
-        for (int i = 0; i < num_guests; i++) {
-            struct guest_info guest = guest_list[i];
-            guest_addr.sin_addr.s_addr = inet_addr(guest.ip);
+        int i = 0;
+        struct guest_info* curr_guest = guest_list;
+        while (curr_guest != NULL) {
+            // cria a porta com o id do guest
+            char guest_port[10];
+            snprintf(guest_port, sizeof(guest_port), "%d", MONITORING_PORT + i);
+
+            // atualiza a porta do socket com a porta do guest iterado
+            guest_addr.sin_port = htons(atoi(guest_port));
 
             // envia uma mensagem do tipo SLEEP_STATUS_REQUEST para o guest iterado
             const char* message = "SLEEP_STATUS_REQUEST";
@@ -295,25 +384,34 @@ void* monitoring_service(void* arg) {
                 continue;
             }
 
-            // aguarda uma mensagem do tipo SLEE_STATUS_RESPONSE do guest iterado
+            // aguarda uma mensagem do tipo SLEEP_STATUS_RESPONSE do guest iterado
             char buffer[MAX_MSG_LEN];
             ssize_t recv_len = recvfrom(monitoring_socket, buffer, sizeof(buffer), 0, (struct sockaddr*)&guest_addr, &guest_addr_len);
             if (recv_len < 0) {
-                perror("[Monitoring|Manager] Erro ao receber a mensagem do guest (SLEEP_STATUS_RESPONSE)");
+                management_service(curr_guest->ip, curr_guest->port, curr_guest->mac_address, curr_guest->hostname, "asleep");
                 continue;
             }
+            
+            if (strcmp(buffer, "awaken") == 0) {
+                management_service(curr_guest->ip, curr_guest->port, curr_guest->mac_address, curr_guest->hostname, "awaken");
+            }
+            else if (strcmp(buffer, "SLEEP_SERVICE_QUIT") == 0) {
+                // envia uma mensagem do tipo SLEEP_QUIT_ACKNOWLEDGE para o guest iterado
+                const char* message = "SLEEP_QUIT_ACKNOWLEDGE";
+                ssize_t send_len = sendto(monitoring_socket, message, strlen(message), 0, (struct sockaddr*)&guest_addr, sizeof(guest_addr));
+                if (send_len < 0) {
+                    perror("[Monitoring|Manager] Erro ao enviar a mensagem ao guest (SLEEP_QUIT_ACKNOWLEDGE)");
+                    continue;
+                }
 
-            buffer[recv_len] = '\0';
-            printf("[Monitoring|Manager] Status do guest (%s:%d): %s\n", inet_ntoa(guest_addr.sin_addr), ntohs(guest_addr.sin_port), buffer);
+                remove_guest(curr_guest->id);
+            }
 
-            // atualiza o guest com o estado atual de sono (awaken/asleep)
-            guest.status = buffer;
-            guest_list[i] = guest;
+            curr_guest = curr_guest->next; // move para o próximo guest na lista
+            i++;
         }
 
-        sleep(5);
-
-        show_guest_list();
+        sleep(2);
     }
 
     close(monitoring_socket);
@@ -321,13 +419,20 @@ void* monitoring_service(void* arg) {
     return NULL;
 }
 
-void management_service(char* ip, int port, char* mac, char* interface) {
+void management_service(char* ip, int port, char* mac, char* hostname, char* buffer) {
+    // protege o acesso simultâneo
+    pthread_mutex_lock(&guest_list_mutex);
+
     // verifica se o guest já está na lista
     // a estrutura de lista escolhida é uma LSE (com ponteiro apenas para o próximo guest)
     struct guest_info* curr = guest_list;
     while (curr != NULL) {
         if (strcmp(curr->ip, ip) == 0 && curr->port == port) {
-            printf("[Management|Manager] Guest (%s:%d) ja se encontra na lista\n", ip, port);
+            // atualiza a estrutura do guest com o novo status
+            strcpy(curr->status, buffer);
+
+            // libera o mutex antes de retornar
+            pthread_mutex_unlock(&guest_list_mutex);
             return;
         }
         curr = curr->next;
@@ -342,10 +447,12 @@ void management_service(char* ip, int port, char* mac, char* interface) {
 
     // preenche a estrutura
     // obs.: ainda não se conhece o estado do guest
+    new_guest->id = num_guests;
+    strcpy(new_guest->status, buffer);
+    strcpy(new_guest->hostname, hostname);
+    strcpy(new_guest->mac_address, mac);
     strcpy(new_guest->ip, ip);
     new_guest->port = port;
-    strcpy(new_guest->mac_address, mac);
-    strcpy(new_guest->network_interface, interface);
     new_guest->next = NULL;
 
     // adiciona o novo guest na lista
@@ -362,52 +469,185 @@ void management_service(char* ip, int port, char* mac, char* interface) {
 
     num_guests++;
 
-    printf("[Management|Manager] Novo guest \"%d\" incluido.\n", num_guests-1);
-    printf("[Management|Manager] IP:PORTA - (%s:%d).\n", ip, port); 
-    printf("[Management|Manager] MAC/INTERFACE - (%s/%s).\n", mac, interface);
+    // libera o mutex após a atualização
+    pthread_mutex_unlock(&guest_list_mutex);
 }
 
-void interface_service() {
-    // aguarda o usuário entrar com o comando desejado
-    // pode ser:
-    //   list   - lista os guests atualmente conectados
-    //   wakeup - acorda um guest por seu hostname (id)
-    //   exit   - guest encerra participação no serviço de gerenciamento de sono
+void* interface_service(void* arg) {
+    // identificação se o usuário é "manager" ou "guest"
+    char* user_type = (char *) arg;
+
+    printf("[Interface] Servico de Gerenciamento de Sono\n\n");
+    printf("[Interface] Comandos disponiveis:\n");
+    if(strcmp(user_type, "manager") == 0){
+        printf("[Interface] list                   - Lista os \"guests\" participantes do servico.\n");
+        printf("[Interface] wakeup <hostname> <id> - Envia o pacote WOL para o \"guest\" de <hostname> e <id>.\n");
+        printf("[Interface] cls                    - Limpa sua tela.\n");
+    }
+    printf("[Interface] exit                   - Encerra sua participacao no servico.\n");
+
     while (1) {
-        char input[10];
-        printf("[Interface] Entre com um comando (list/wakeup/exit): ");
+        printf("[Interface] Entre com um comando: ");
+
+        char input[50];
         if (fgets(input, sizeof(input), stdin) == NULL) {
             continue;
         }
-
         input[strcspn(input, "\n")] = 0;
 
-        if (strcmp(input, "list") == 0) {
-            printf("[Interface] Comando LIST executado.\n");
+        // separa o comando do parâmetro passado
+        char* command = strtok(input, " ");
+
+        if (strcmp(command, "list") == 0 && strcmp(user_type, "manager") == 0) {
             show_guest_list();
         }
-        else if (strcmp(input, "wakeup") == 0) {
-            printf("[Interface] Comando WAKEUP executado.\n");
-            // send_wol_packet();
+        else if (strcmp(command, "wakeup") == 0 && strcmp(user_type, "manager") == 0) {
+            char* hostname;
+            int id;
+
+            hostname = strtok(NULL, " ");
+            if (hostname == NULL) {
+                printf("\n[Interface] Uso: wakeup <hostname> <id>.\n\n");
+                continue;
+            }
+
+            id = atoi(strtok(NULL, " "));
+
+            send_wol_packet(hostname, id);
         }
-        else if (strcmp(input, "exit") == 0) {
-            printf("[Interface] Comando EXIT executado.\n");
+        else if (strcmp(command, "exit") == 0) {
+            printf("\n[Interface] Encerrando sua participacao no servico.\n\n");
+
+            // altera o id do guest para -1 para sinalizar para o loop de envio/recebimento
+            // de mensagens (na "main") que o guest deve enviar uma mensagem do tipo SLEEP_SERVICE_QUIT
+            // para o manager utilizando o monitoring_socket
+            if (strcmp(user_type, "guest") == 0){
+                current_guest_id = -1;
+            }
+
+            // sincronização de condição:
+            // aguarda receber mensagem do manager como um "ack" de sua saida do serviço
+            while (current_guest_id == -1) {}
+
+            // destrói o mutex e encerra o programa
+            pthread_mutex_destroy(&guest_list_mutex);
             exit(0);
         }
+        else if (strcmp(command, "cls") == 0 && strcmp(user_type, "manager") == 0) {
+            system("clear");
+            
+            printf("[Interface] Servico de Gerenciamento de Sono\n\n");
+            printf("[Interface] Comandos disponiveis:\n");
+            if(strcmp(user_type, "manager") == 0){
+                printf("[Interface] list                   - Lista os \"guests\" participantes do servico.\n");
+                printf("[Interface] wakeup <hostname> <id> - Envia o pacote WOL para o \"guest\" de <hostname> e <id>.\n");
+                printf("[Interface] cls                    - Limpa sua tela.\n");
+            }
+            printf("[Interface] exit                   - Encerra sua participacao no servico.\n");
+        }
         else {
-            printf("[Interface] Comando invalido.\n");
+            printf("\n[Interface] Comando invalido.\n\n");
         }
     }
 }
 
-void show_guest_list() {
-    // imprime a lista de guests
-    printf("\n[Interface] Lista de Guests\n");
-    printf("%-4s%-15s%-10s%-10s\n", "ID", "IP", "Port", "Status");
-    for (int i = 0; i < num_guests; i++) {
-        printf("%-4d%-15s%-10d%-10s\n", i, guest_list[i].ip, guest_list[i].port, guest_list[i].status);
+void remove_guest(int id) {
+    // lock mutex antes de mexer na lista
+    pthread_mutex_lock(&guest_list_mutex);
+
+    // percorre a lista para encontrar o guest a ser removido
+    struct guest_info* curr_guest = guest_list;
+    struct guest_info* prev_guest = NULL;
+
+    while (curr_guest != NULL && curr_guest->id != id) {
+        prev_guest = curr_guest;
+        curr_guest = curr_guest->next;
     }
-    printf("\n");
+
+    if (curr_guest == NULL) {
+        printf("[Management|Manager] Guest com ID %d nao encontrado na lista\n", id);
+        pthread_mutex_unlock(&guest_list_mutex);
+        return;
+    }
+
+    // atualiza os IDs dos guests após a remoção
+    if (curr_guest->id == 0) {
+        struct guest_info* temp_guest = curr_guest->next;
+        while (temp_guest != NULL) {
+            temp_guest->id = temp_guest->id - 1;
+            temp_guest = temp_guest->next;
+        }
+    } else {
+        struct guest_info* temp_guest = curr_guest->next;
+        while (temp_guest != NULL) {
+            temp_guest->id = temp_guest->id - 1;
+            temp_guest = temp_guest->next;
+        }
+    }
+
+    // se o guest a ser removido é o primeiro da lista
+    if (prev_guest == NULL) {
+        guest_list = curr_guest->next;
+    } else {
+        prev_guest->next = curr_guest->next;
+    }
+
+    // atualiza o número de guests
+    num_guests--;
+
+    // libera a memória alocada para o guest removido
+    free(curr_guest);
+
+    // unlock mutex antes de terminar a função
+    pthread_mutex_unlock(&guest_list_mutex);
+}
+
+void send_wol_packet(char* hostname, int id) {
+    // itera a lista de guest até encontrar guest com certo "hostname, id"
+    struct guest_info* curr_guest = guest_list;
+    while (curr_guest != NULL && strcmp(curr_guest->hostname, hostname) != 0 && curr_guest->id != id) {
+        curr_guest = curr_guest->next;
+    }
+
+    if (curr_guest == NULL) {
+        fprintf(stderr, "[Pacote WOL|Manager] Guest com ID %d não encontrado na lista\n", id);
+        return;
+    }
+
+    // prepara o comando WOL
+    char command[150];
+    snprintf(command, sizeof(command), "wakeonlan %s", curr_guest->mac_address);
+
+    // executa o comando
+    FILE* fp = popen(command, "r");
+    if (fp == NULL) {
+        perror("[Pacote WOL|Manager] Erro ao executar comando wakeonlan");
+        return;
+    }
+
+    // lê a saída do comando
+    char output[100];
+    while (fgets(output, sizeof(output), fp) != NULL) {
+        printf("\n[Pacote WOL|Manager] %s\n", output);
+    }
+
+    pclose(fp);
+}
+
+void show_guest_list() {
+    printf("\n[Interface] Lista de guests:\n");
+    printf("|=========================================================================================|\n");
+    printf("| %11s      | %-24s | %-25s | %-12s |\n", "Hostname(Id)", "Ip:Port", "MAC Address", "Status");
+
+    struct guest_info* curr = guest_list;
+    int i = 0;
+    while (curr != NULL) {
+        printf("| %-8s(%d)       | %s:%-14d | %-25s | %-12s |\n", curr->hostname, curr->id, curr->ip, curr->port, curr->mac_address, curr->status);
+        curr = curr->next;
+        i++;
+    }
+
+    printf("|=========================================================================================|\n\n");
 }
 
 char* get_mac_address() {
@@ -431,25 +671,35 @@ char* get_mac_address() {
     return mac;
 }
 
-char* get_network_interface() {
-    // obtém o nome da interface de rede do guest usando chamadas de sistema e regex
-    char interface_name[10];
+char* get_hostname() {
+    // obtém o nome do hostname do guest usando chamadas de sistema e regex
+    char hostname[256];
 
-    FILE *fp = popen("ifconfig | \
-                      grep -B 1 $(ifconfig | \
-                      grep -m 1 -o '^[^ ]*') | \
-                      awk '/^[^ ]/{print $1}' | \
-                      sed 's/.$//'", "r");
+    FILE *fp = popen("hostname", "r");
     if (fp == NULL) {
-        perror("[Discovery|Guest] Erro ao obter o nome da interface da rede");
+        perror("[Discovery|Guest] Erro ao obter o hostname");
         exit(1);
     }
 
-    fgets(interface_name, sizeof(interface_name), fp);
+    fgets(hostname, sizeof(hostname), fp);
     pclose(fp);
 
-    char* interface = (char*) malloc(strlen(interface_name) + 1);
-    strcpy(interface, interface_name);
+    char* hn = (char*) malloc(strlen(hostname) + 1);
+    strcpy(hn, hostname);
 
-    return interface;
+    return hn;
+}
+
+int get_guest_sleep_status () {
+    // obtém o sleep status acessando a pasta temporária sleep 
+    // que é criada quando a máquina entra em modo hibernação
+    int sleep_status;
+
+    FILE* fp = fopen("/proc/acpi/sleep", "r");
+    if (fp != NULL) {
+        fscanf(fp, "%d", &sleep_status);
+        fclose(fp);
+    }
+
+    return sleep_status;
 }
