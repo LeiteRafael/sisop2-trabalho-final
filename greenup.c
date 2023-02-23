@@ -7,7 +7,7 @@
 //    2. enviar o id atualizado dos guests quando um guest anterior à ele na lista executa o comando EXIT
 //    3. testar o programa nos labs
 
-// >>opcional<<
+// >>opcional<< 
 //    4. melhorar a documentação
 //    5. transformar os "buffers" de envio de mensagem na estrutura citada no pdf
 //    6. modularizar melhor o código
@@ -15,8 +15,6 @@
 //        - desmembrar as funções em funções menores
 //    7. remover as mensagens desnecessárias
 //        - deixar apenas o serviço de interface no console
-//    8. modificar a função da lista de guests
-//        - imprimir uma mensagem quando a lista estiver vazia
 
 
 /* ===================== */
@@ -71,6 +69,7 @@ void* interface_service(void* arg);
 
 void  send_wol_packet(char* hostname, int id);
 void  remove_guest(int id);
+void  update_all_guest_ids();
 void  show_guest_list();
 char* get_mac_address();
 int   get_guest_sleep_status();
@@ -261,6 +260,24 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            /*else {
+                printf("\n%s\n", buffer);
+                char *token = strtok(buffer, " ");
+                char *msg = token;
+
+                token = strtok(NULL, " ");
+                char *id = token;
+                strtok(id, "\n");
+
+                //printf("%s %s %s\n", buffer, msg, id);
+
+                if (strcmp(msg, "ID_UPDATE") == 0) {
+                    int new_id = atoi(id);
+                    current_guest_id = new_id;
+
+                    printf("\n[Monitoring|Guest] Seu novo id é: %d.\n", current_guest_id);
+                
+            }*/
         }
 
         close(monitoring_socket);
@@ -354,7 +371,7 @@ void* monitoring_service(void* arg) {
     }
 
     struct timeval timeout;
-    timeout.tv_sec = 1;
+    timeout.tv_sec = 6;
     timeout.tv_usec = 0;
     if (setsockopt(monitoring_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
         perror("[Monitoring|Guest] Erro ao habilitar o modo Timeout");
@@ -405,6 +422,7 @@ void* monitoring_service(void* arg) {
                 }
 
                 remove_guest(curr_guest->id);
+                //update_all_guest_ids();
             }
 
             curr_guest = curr_guest->next; // move para o próximo guest na lista
@@ -602,6 +620,54 @@ void remove_guest(int id) {
     pthread_mutex_unlock(&guest_list_mutex);
 }
 
+void update_all_guest_ids () {
+    int guest_dec = 0;
+
+    struct guest_info* curr_guest = guest_list;
+
+    // cria e configura socket para se comunicar com o "guest"
+    int monitoring_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (monitoring_socket < 0) {
+        perror("[Management|Manager] Erro ao criar o socket");
+        exit(1);
+    }
+
+    int enable = 1;
+    if (setsockopt(monitoring_socket, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        perror("[Management|Manager] Erro ao habilitar o modo Padrão");
+        exit(1);
+    }
+
+    struct sockaddr_in guest_addr;
+    socklen_t guest_addr_len = sizeof(guest_addr);
+    guest_addr.sin_family = AF_INET;
+
+    int i = num_guests+1; // tem 2 mas acha q é 3
+
+    while (i >= 0) {
+        // cria a porta com o id do guest
+        char guest_port[10];
+        snprintf(guest_port, sizeof(guest_port), "%d", MONITORING_PORT + curr_guest->id ); // 9000 9001 9002
+
+        // atualiza a porta do socket com a porta do guest iterado
+        guest_addr.sin_port = htons(atoi(guest_port));
+
+        char message[MAX_MSG_LEN];
+        snprintf(message, sizeof(message), "ID_UPDATE %d", curr_guest->id + guest_dec); // 0 0 1
+        ssize_t send_len = sendto(monitoring_socket, message, strlen(message), 0, (struct sockaddr*)&guest_addr, sizeof(guest_addr));
+        if (send_len < 0) {
+            printf("erro");
+            guest_dec = -1;
+        }
+
+        curr_guest = curr_guest->next;
+        i--; // 1 0 -1
+    }
+
+    free(curr_guest);
+    close(monitoring_socket);
+}
+
 void send_wol_packet(char* hostname, int id) {
     // itera a lista de guest até encontrar guest com certo "hostname, id"
     struct guest_info* curr_guest = guest_list;
@@ -635,19 +701,23 @@ void send_wol_packet(char* hostname, int id) {
 }
 
 void show_guest_list() {
-    printf("\n[Interface] Lista de guests:\n");
-    printf("|=========================================================================================|\n");
-    printf("| %11s      | %-24s | %-25s | %-12s |\n", "Hostname(Id)", "Ip:Port", "MAC Address", "Status");
-
     struct guest_info* curr = guest_list;
     int i = 0;
-    while (curr != NULL) {
-        printf("| %-8s(%d)       | %s:%-14d | %-25s | %-12s |\n", curr->hostname, curr->id, curr->ip, curr->port, curr->mac_address, curr->status);
-        curr = curr->next;
-        i++;
-    }
 
-    printf("|=========================================================================================|\n\n");
+    if (curr != NULL) {
+        printf("\n[Interface] Lista de guests:\n");
+        printf("|=========================================================================================|\n");
+        printf("| %11s      | %-24s | %-25s | %-12s |\n", "Hostname(Id)", "Ip:Port", "MAC Address", "Status");
+        while (curr != NULL) {
+            printf("| %-8s(%d)       | %s:%-14d | %-25s | %-12s |\n", curr->hostname, curr->id, curr->ip, curr->port, curr->mac_address, curr->status);
+            curr = curr->next;
+            i++;
+        }
+        printf("|=========================================================================================|\n\n");
+    }
+    else{
+        printf("\n[Interface] Lista de guests: VAZIA.\n\n");
+    }
 }
 
 char* get_mac_address() {
