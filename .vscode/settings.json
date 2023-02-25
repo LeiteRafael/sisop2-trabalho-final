@@ -1,9 +1,0 @@
-{
-    "files.associations": {
-        "inet.h": "c",
-        "ioctl.h": "c",
-        "manager.h": "c",
-        "global.h": "c",
-        "guest.h": "c"
-    }
-}
