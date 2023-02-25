@@ -41,6 +41,6 @@ gcc main.c manager.c guest.c -o sms
 ./sms [manager|guest]
 ```
 
-## Parte II
+# Parte II
 
 TO-DO
