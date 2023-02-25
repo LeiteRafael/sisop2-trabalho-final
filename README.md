@@ -30,7 +30,7 @@ Subserviço de Interface (Interface Subservice), para exibir a relação atualiz
 permitir a interação com usuários (para, por ex., enviar um comando para acordar uma estação).
 </li>
 
-# Compilação e Execução
+## Compilação e Execução
 
 Para compilar o programa, baixe os arquivos e coloque-os em uma pasta.
 <br><br>
