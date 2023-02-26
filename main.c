@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
             pthread_join(interface_thread, NULL);
         }
         else{
-            printf("Nao existe o tipo de usuario \"%s\"", argv[1]);
+            printf("Nao existe o tipo de usuario \"%s\"\n", argv[1]);
             printf("Uso: %s [manager|guest]\n", argv[0]);
             exit(1);
         }
