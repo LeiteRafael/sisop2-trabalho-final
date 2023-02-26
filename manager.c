@@ -11,8 +11,6 @@ pthread_mutex_t guest_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 struct guest_info* guest_list = NULL; // lista de guests conectados
 int num_guests = 0; // número de guests conectados
 
-extern int current_guest_id;
-
 
 /* =================================== */
 /* ==== IMPLEMENTAÇÃO DAS FUNÇÕES ==== */
@@ -220,17 +218,15 @@ void management_service(char* ip, int port, char* mac, char* hostname, char* buf
     pthread_mutex_unlock(&guest_list_mutex);
 }
 
-void* interface_service(void* arg) {
+void* manager_interface_service() {
     // identificação se o usuário é "manager" ou "guest"
-    char* user_type = (char *) arg;
+    char* user_type = "manager";
 
     printf("[Interface] Servico de Gerenciamento de Sono\n\n");
     printf("[Interface] Comandos disponiveis:\n");
-    if(strcmp(user_type, "manager") == 0){
-        printf("[Interface] list                   - Lista os \"guests\" participantes do servico.\n");
-        printf("[Interface] wakeup <hostname> <id> - Envia o pacote WOL para o \"guest\" de <hostname> e <id>.\n");
-        printf("[Interface] cls                    - Limpa sua tela.\n");
-    }
+    printf("[Interface] list                   - Lista os \"guests\" participantes do servico.\n");
+    printf("[Interface] wakeup <hostname> <id> - Envia o pacote WOL para o \"guest\" de <hostname> e <id>.\n");
+    printf("[Interface] cls                    - Limpa sua tela.\n");
     printf("[Interface] exit                   - Encerra sua participacao no servico.\n");
 
     while (1) {
@@ -245,10 +241,10 @@ void* interface_service(void* arg) {
         // separa o comando do parâmetro passado
         char* command = strtok(input, " ");
 
-        if (strcmp(command, "list") == 0 && strcmp(user_type, "manager") == 0) {
+        if (strcmp(command, "list") == 0) {
             show_guest_list();
         }
-        else if (strcmp(command, "wakeup") == 0 && strcmp(user_type, "manager") == 0) {
+        else if (strcmp(command, "wakeup") == 0) {
             char* hostname;
             int id;
 
@@ -265,31 +261,18 @@ void* interface_service(void* arg) {
         else if (strcmp(command, "exit") == 0) {
             printf("\n[Interface] Encerrando sua participacao no servico.\n\n");
 
-            // altera o id do guest para -1 para sinalizar para o loop de envio/recebimento
-            // de mensagens (na "main") que o guest deve enviar uma mensagem do tipo SLEEP_SERVICE_QUIT
-            // para o manager utilizando o monitoring_socket
-            if (strcmp(user_type, "guest") == 0){
-                current_guest_id = -1;
-            }
-
-            // sincronização de condição:
-            // aguarda receber mensagem do manager como um "ack" de sua saida do serviço
-            while (current_guest_id == -1) {}
-
             // destrói o mutex e encerra o programa
             pthread_mutex_destroy(&guest_list_mutex);
             exit(0);
         }
-        else if (strcmp(command, "cls") == 0 && strcmp(user_type, "manager") == 0) {
+        else if (strcmp(command, "cls") == 0) {
             system("clear");
             
             printf("[Interface] Servico de Gerenciamento de Sono\n\n");
             printf("[Interface] Comandos disponiveis:\n");
-            if(strcmp(user_type, "manager") == 0){
-                printf("[Interface] list                   - Lista os \"guests\" participantes do servico.\n");
-                printf("[Interface] wakeup <hostname> <id> - Envia o pacote WOL para o \"guest\" de <hostname> e <id>.\n");
-                printf("[Interface] cls                    - Limpa sua tela.\n");
-            }
+            printf("[Interface] list                   - Lista os \"guests\" participantes do servico.\n");
+            printf("[Interface] wakeup <hostname> <id> - Envia o pacote WOL para o \"guest\" de <hostname> e <id>.\n");
+            printf("[Interface] cls                    - Limpa sua tela.\n");
             printf("[Interface] exit                   - Encerra sua participacao no servico.\n");
         }
         else {
