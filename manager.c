@@ -53,8 +53,6 @@ void* discovery_service(void* arg) {
             continue;
         }
 
-	//printf("%s\n", buffer);
-
         // separa as strings em mac e hostname
         char *token = strtok(buffer, ",");
         char *mac = token;
@@ -117,7 +115,8 @@ void* monitoring_service(void* arg) {
             char guest_port[10];
             snprintf(guest_port, sizeof(guest_port), "%d", MONITORING_PORT + i);
 
-            // atualiza a porta do socket com a porta do guest iterado
+            // atualiza a porta e o ip do socket com a porta do guest iterado
+    		inet_aton(curr_guest->ip, &guest_addr.sin_addr);
             guest_addr.sin_port = htons(atoi(guest_port));
 
             // envia uma mensagem do tipo SLEEP_STATUS_REQUEST para o guest iterado
