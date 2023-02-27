@@ -116,7 +116,7 @@ void* monitoring_service(void* arg) {
             snprintf(guest_port, sizeof(guest_port), "%d", MONITORING_PORT + i);
 
             // atualiza a porta e o ip do socket com a porta do guest iterado
-    		inet_aton(curr_guest->ip, &guest_addr.sin_addr);
+            inet_aton(curr_guest->ip, &guest_addr.sin_addr);
             guest_addr.sin_port = htons(atoi(guest_port));
 
             // envia uma mensagem do tipo SLEEP_STATUS_REQUEST para o guest iterado
