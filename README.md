@@ -36,7 +36,7 @@ Para compilar o programa, baixe os arquivos e coloque-os em uma pasta.
 <br><br>
 Em seguida, execute os seguintes comandos no console:
 ```
-cd \<pasta\>
+cd <pasta>
 gcc main.c manager.c guest.c -lpthread -o sms
 ./sms [manager|guest]
 ```
